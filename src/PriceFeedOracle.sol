@@ -99,9 +99,9 @@ contract PriceFeedOracle is IPriceFeedOracle {
 
         if (feedDecimals < 18) {
             return price * (10 ** (18 - feedDecimals));
-        }else if (feedDecimals > 18) {
+        } else if (feedDecimals > 18) {
             return price / (10 ** (feedDecimals - 18));
-        }else {
+        } else {
             return price;
         }
     }
