@@ -38,6 +38,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard{
     error Borrowing__NotEnoughWithdrawableBalance();
     error Borrowing__UnavaliablenBalance();
     error Borrowing__NoDebtForToken();
+    error Borrowing__NoCurrentCollateral();
 
 
     ///////////////////////////////////////////////////////
@@ -108,7 +109,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard{
        supportedTokens = oracle.getAllSupportedTokens();
     }
 
-    function depositCollateral(uint256 _amount, address _token) external nonReentrant zeroCheck(_amount){
+    function depositCollateral(uint256 _amount, address _token) external override nonReentrant zeroCheck(_amount){
         // checks
         bool supported;
         for(uint256 i = 0; i < supportedTokens.length; i++){
@@ -136,7 +137,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard{
 
     }
 
-    function borrow(uint256 _amount, address _borrowToken, address _collateral) external nonReentrant zeroCheck(_amount){
+    function borrow(uint256 _amount, address _borrowToken, address _collateral) external override nonReentrant zeroCheck(_amount){
         // checks
         if(_borrowToken == _collateral){
             revert Borrowing__CantBeSameToken();
@@ -211,7 +212,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard{
     }
 
     
-    function repay(address _token, uint256 _positionId, uint256 _amount)external nonReentrant zeroCheck(_amount){
+    function repay(address _token, uint256 _positionId, uint256 _amount) external override nonReentrant zeroCheck(_amount){
         BorrowStatus storage position = debtPosition[msg.sender][_token][_positionId];
 
         // CHECKS
@@ -231,7 +232,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard{
         position.amount -= _amount;
         userDebt[msg.sender][_token] -= _amount;
         if(position.amount == 0){
-            delete position;
+            delete debtPosition[msg.sender][_token][_positionId];
         }
 
         // INTERACTIONS
@@ -239,7 +240,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard{
 
     }
 
-    function withdraw(address _token, uint256 _amount) external nonReentrant zeroCheck(_amount){
+    function withdraw(address _token, uint256 _amount) external override nonReentrant zeroCheck(_amount){
             (uint256 amount, uint256 amountInUsd) = getWithdrawableBalance(_token);
             if (collateral[msg.sender][_token] == 0) {
                 revert Borrowing__NoCurrentCollateral();
@@ -253,10 +254,17 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard{
             IERC20(_token).safeTransfer(msg.sender, _amount);
     }
     
+    function liquidate(address _user, uint256 _amount) external{
 
-    function getWithdrawableBalance(address _token) public view returns(uint256 amount, uint256 amountInUsd){
+    }
+
+
+    ///////////////////////////////////////////////////////
+    ///    HELPERS
+    ///////////////////////////////////////////////////////
+    function getWithdrawableBalance(address _token) public view override returns(uint256 amount, uint256 amountInUsd){
         uint256 _collateral = collateral[msg.sender][_token];
-        uint256 worth = calculateTokenWorthInUsd(_collateral);
+        uint256 worth = oracle.calculateTokenWorthInUsd(_token, _collateral);
         uint256 debtInUsd;
 
         Against[] storage debts = debtAssociate[msg.sender][_token];
@@ -274,17 +282,14 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard{
         );
 
 
-        if (minimumCollateralUsd >= collateralWorth) {
+        if (minimumCollateralUsd >= worth) {
             return (0, 0);
         }
-        uint256 amountInUsd = collateralWorth - minimumCollateralUsd;
-        uint256 amount = oracle.usdWorthToTokenAmount(_token, amountInUsd);
+        amountInUsd = worth - minimumCollateralUsd;
+        amount = oracle.usdWorthToTokenAmount(_token, amountInUsd);
+    }
 
-    ///////////////////////////////////////////////////////
-    ///    HELPERS
-    ///////////////////////////////////////////////////////
-
-    function _interest(uint256 _amount, address _token) internal view returns(uint256){
+    function _interest(uint256 _amount, address _token) public view override returns(uint256){
         uint256 amountInUsd = oracle.calculateTokenWorthInUsd(_token, _amount);
 
         uint256 rate = _interestRate(_token);
@@ -311,7 +316,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard{
     }
 
 
-    function _interestRate(address _token) internal view returns(uint256){
+    function _interestRate(address _token) public view override returns(uint256){
         //checks the liquidity of a token in lending protocol
         uint256 liquidity = lend.getLiquidity(_token);
         uint256 firstQuota = (liquidity * firstQuotaPercent) / PERCENTAGE_PRECISION;

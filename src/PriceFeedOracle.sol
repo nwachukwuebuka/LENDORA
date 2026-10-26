@@ -13,7 +13,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 
 /**
-***@author Nwachukwu Chkwuebuka
+***@author Nwachukwu Chukwuebuka
 ***@title Lendora Price Feed
 ***@notice Contract implemetation of the price feed interface (IPriceFeedOracle.sol)
 */

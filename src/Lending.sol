@@ -35,6 +35,7 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
     error Lending__PenaltyRateTooLow();
     error Lending__InvalidAddress();
     error Lending__BorrowingAlreadySet();
+    error Lending__NotBorrowingContract();
 
     ///////////////////////////////////////////////////////
     ///    VARIABLES
@@ -61,7 +62,7 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
     ///////////////////////////////////////////////////////
     modifier onlyBorrowingContract() {
         if (msg.sender != borrowingContract) {
-            revert NotBorrowingContract();
+            revert Lending__NotBorrowingContract();
         }
         _;
     }
@@ -208,11 +209,11 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
     }
     function setBorrowingContract(address _borrowingContract) external onlyOwner {
         if (_borrowingContract == address(0)) {
-            revert InvalidAddress();
+            revert Lending__InvalidAddress();
         }
 
         if (borrowingContract != address(0)) {
-            revert BorrowingAlreadySet();
+            revert Lending__BorrowingAlreadySet();
     }
 
     borrowingContract = _borrowingContract;

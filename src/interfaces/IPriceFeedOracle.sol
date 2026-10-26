@@ -29,7 +29,7 @@ interface IPriceFeedOracle{
 
     function getAllSupportedTokens() external view returns (address[] memory);
 
-    function usdWorthToTokenAmount(address _token, uint256 _worth) external view returns (address _token, uint256 _worth);
+    function usdWorthToTokenAmount(address _token, uint256 _worth) external view returns(uint256);
 
 
 }
