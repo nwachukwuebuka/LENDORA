@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+
+/**
+***@author Nwachukwu Chkwuebuka
+***@title Lendora Borrowing Interface
+*/
+interface IBorrowing {
+
+    function depositCollateral(uint256 _amount) external;
+    
+    function borrow(uint256 _amount, address _borrowToken, address _collateral) external;
+
+    function repay(address _token, uint256 positionId, uint256 amount) external;
+
+    function liquidate(address _user, uint256 _amount) external;
+
+
+}
