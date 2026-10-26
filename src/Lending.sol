@@ -13,15 +13,14 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
-***@author Nwachukwu Chukwuebuka
-***@title Lendora Lending Contract
-***@notice Implements the lending functionality of the Lendora DeFi protocol.
-***         Allocates 60% of penalty fees to lenders and retains the
-***         remaining 40% as protocol liquidity.
-***@dev Manages lending positions, withdrawals, lock durations, and early-withdrawal penalties.
-*/
-contract Lending is ILending, Ownable, ReentrancyGuard{
-
+ ***@author Nwachukwu Chukwuebuka
+ ***@title Lendora Lending Contract
+ ***@notice Implements the lending functionality of the Lendora DeFi protocol.
+ ***         Allocates 60% of penalty fees to lenders and retains the
+ ***         remaining 40% as protocol liquidity.
+ ***@dev Manages lending positions, withdrawals, lock durations, and early-withdrawal penalties.
+ */
+contract Lending is ILending, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     ///////////////////////////////////////////////////////
@@ -42,20 +41,19 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
     /////////////////////////////////////////////////////
     uint256 private constant PERCENTAGE_PRECSION = 100;
     uint256 public lendersRewardPercent = 40;
-    uint256 public lockDuration =  7_257_600; //84 days
+    uint256 public lockDuration = 7_257_600; //84 days
     uint256 public penaltyRate = 5; // 5%
     uint256 public minimumDeposit = 1000e18; //$1000
     mapping(address token => uint256 fees) private penaltyReward;
     mapping(address user => mapping(address token => uint256 depositedAmount)) private depositRecord;
 
-    struct LendingPosition{
+    struct LendingPosition {
         uint256 amount;
         uint256 startTime;
     }
     mapping(address user => mapping(address token => LendingPosition[])) private position;
     IPriceFeedOracle private priceOracle;
     address public borrowingContract;
-
 
     ///////////////////////////////////////////////////////
     ///    MODIFIERS
@@ -67,7 +65,6 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
         _;
     }
 
-
     ///////////////////////////////////////////////////////
     ///    FUNCTIONS
     ///////////////////////////////////////////////////////
@@ -75,48 +72,36 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
     /// @notice Initializes the lending contract.
     /// @dev Sets the initial owner and price oracle.
     /// @param _priceFeedOracle The address of the price oracle contract.
-    constructor(address _priceFeedOracle)
-        Ownable(msg.sender)
-    {
+    constructor(address _priceFeedOracle) Ownable(msg.sender) {
         priceOracle = IPriceFeedOracle(_priceFeedOracle);
     }
 
-
-
     /// @notice Deposits tokens into the lending protocol.
-    /// @dev Records the lending position and its start timestamp, also 
+    /// @dev Records the lending position and its start timestamp, also
     ///      records the total amount of a particular that a user owns.
     /// @param _token The address of the token to lend.
     /// @param _amount The amount of tokens to deposit.
-    function lend(uint256 _amount, address _token) external override nonReentrant{
-
+    function lend(uint256 _amount, address _token) external override nonReentrant {
         bool supportedToken = priceOracle.isTokenSupported(_token);
         uint256 worth = priceOracle.calculateTokenWorthInUsd(_token, _amount);
 
-        if(!supportedToken || (worth < minimumDeposit)){
+        if (!supportedToken || (worth < minimumDeposit)) {
             revert Lending__LessThanMinimalAmount();
         }
-        position[msg.sender][_token].push(
-            LendingPosition({
-                amount: _amount,
-                startTime: block.timestamp
-
-            })
-        );
+        position[msg.sender][_token].push(LendingPosition({amount: _amount, startTime: block.timestamp}));
         depositRecord[msg.sender][_token] += _amount;
 
         IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
     }
-
 
     /// @notice Withdraws tokens from an existing lending position.
     /// @dev Calculates any early-withdrawal penalty, updates the user's
     ///      records, and transfers the remaining amount to the user.
     /// @param _token The address of the token associated with the position.
     /// @param _position The 1-based index of the lending position to withdraw.
-    function withdraw(address _token, uint256 _position) external override nonReentrant{
+    function withdraw(address _token, uint256 _position) external override nonReentrant {
         //CHECKS
-        if(_position < 1){
+        if (_position < 1) {
             revert Lending__PositionLessThanOne();
         }
         uint256 positionId = _position - 1;
@@ -138,7 +123,6 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
 
         uint256 penaltyFees = (totalPenalty * lendersRewardPercent) / PERCENTAGE_PRECSION;
 
-
         //EFFECTS
         //update the position
         delete position[msg.sender][_token][positionId];
@@ -155,7 +139,6 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
         IERC20(_token).safeTransfer(_receiver, _amount);
     }
 
-
     ///////////////////////////////////////////////////////
     ///    HELPERS
     ///////////////////////////////////////////////////////
@@ -165,8 +148,7 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
     ///      calculates the penalty based on the remaining lock duration.
     /// @param queriedPos The lending position being evaluated.
     /// @return penalty The calculated early-withdrawal penalty in token units.
-    function _penalty(LendingPosition memory queriedPos) internal view returns(uint256){
-        
+    function _penalty(LendingPosition memory queriedPos) internal view returns (uint256) {
         uint256 totalTime = queriedPos.startTime;
         uint256 initialLend = queriedPos.amount;
 
@@ -177,10 +159,7 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
         uint256 Penalty = (initialLend * penaltyRate * hoursLeft) / lockDuration * 100;
 
         return Penalty;
-
-    } 
-
-
+    }
 
     ///////////////////////////////////////////////////////
     ///    UPDATERS
@@ -190,7 +169,7 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
     /// @dev Only the contract owner can change the lock duration.
     /// @param _newDuration The new lock duration in seconds.
     function setLockDuration(uint256 _newDuration) external onlyOwner {
-         lockDuration = _newDuration;
+        lockDuration = _newDuration;
     }
 
     ///@notice Updates the penalty rate for early withdrawals.
@@ -201,12 +180,13 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
         if (_newRate > 10) {
             revert Lending__PenaltyRateTooHigh();
         }
-        if(_newRate < 3){
+        if (_newRate < 3) {
             revert Lending__PenaltyRateTooLow();
         }
 
         penaltyRate = _newRate;
     }
+
     function setBorrowingContract(address _borrowingContract) external onlyOwner {
         if (_borrowingContract == address(0)) {
             revert Lending__InvalidAddress();
@@ -214,16 +194,16 @@ contract Lending is ILending, Ownable, ReentrancyGuard{
 
         if (borrowingContract != address(0)) {
             revert Lending__BorrowingAlreadySet();
+        }
+
+        borrowingContract = _borrowingContract;
     }
 
-    borrowingContract = _borrowingContract;
-}
-    
     ///////////////////////////////////////////////////////
     ///    GETTERS
     ///////////////////////////////////////////////////////
 
-    function getLiquidity(address _token) public view returns (uint256){
+    function getLiquidity(address _token) public view returns (uint256) {
         return (IERC20(_token).balanceOf(address(this)) - penaltyReward[_token]);
     }
 }
