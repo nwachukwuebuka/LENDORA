@@ -41,9 +41,7 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
     error Lending__AmountCantBeZero();
     error Lending__WithdrawalPending();
     error Lending__InsufficientBalance();
-    error  Lending__LiquidationOutOfBound();
-
-
+    error Lending__LiquidationOutOfBound();
 
     ///////////////////////////////////////////////////////
     ///    VARIABLES
@@ -95,12 +93,11 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
         _;
     }
     modifier zeroCheck(uint256 _amount) {
-    if (_amount == 0) {
-        revert Lending__AmountCantBeZero();
+        if (_amount == 0) {
+            revert Lending__AmountCantBeZero();
+        }
+        _;
     }
-    _;
-}
-
 
     ///////////////////////////////////////////////////////
     ///    FUNCTIONS
@@ -141,7 +138,6 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
     }
 
     function withdraw(address _token, uint256 _position, uint256 _amount) external nonReentrant zeroCheck(_amount) {
-    
         PendingWithdrawal[] storage pend = pendingWithdrawals[msg.sender][_token];
 
         for (uint256 i = 0; i < pend.length; i++) {
@@ -290,7 +286,7 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
         uint256 _requestedLoan,
         uint256 _repayAmount,
         uint256 _interest
-    ) external  onlyBorrowingContract {
+    ) external onlyBorrowingContract {
         borrowRecords[_borrower].push(
             BorrowRecord({
                 uniqueId: _positionId,
