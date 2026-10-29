@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-This project is a decentralized finance (DeFi) protocol designed to provide lending, borrowing, and token swapping.
+This project is a decentralized finance (DeFi) protocol designed to provide lending, borrowing, and token swapping(future functionality).
 
 The project will be developed incrementally, with a strong focus on security, transparent rules, and understanding how each component works before moving to the next.
 
@@ -24,10 +24,10 @@ Each supported asset will have its own lending pool. For example, a USDC pool ac
 
 ### Collateral and borrowing
 
-- Maximum initial borrowing LTV: 70%.
+- Maximum initial borrowing LTV: 50%.
 - Liquidation threshold: 80%.
 - Liquidation bonus: 5%.
-- Liquidation close factor: 50% of the borrower's outstanding debt per liquidation transaction.
+- Liquidation close factor: closes the entire debt position.
 
 Borrowing is limited by both available pool liquidity and the borrower's collateral value.
 

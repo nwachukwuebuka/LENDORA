@@ -30,52 +30,52 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
     error Borrowing__LessThanMinimumDeposit();
     error Borrowing__CantBeSameToken();
     error Borrowing__LessThanMinimumCollateralWorth();
+    error Borrowing__CollateralMustBeTwiceAsDebt();
     error Borrowing__CantBorrowMoreThanLimit();
-    error Borrowing__InvalidInterestRate();
-    error Borrowing__LoanPositionCleared();
-    error Borrowing__NotEnoughWithdrawableBalance();
-    error Borrowing__UnavaliablenBalance();
-    error Borrowing__NoDebtForToken();
+    error Borrowing__PositionCleared();
+    error Borrowing__LessThanDebtAmount();
     error Borrowing__NoCurrentCollateral();
+    error Borrowing__InvalidPosition();
+    error Borrowing__LiquidationOutOfBound();
+    error Borrowing__IncorrectRepaymentAmount();
+    error Borrowing__NotEnoughWithdrawableBalance();
+    error Borrowing__UserNotLiquidatable();
+    error Borrowing__InvalidInterestRate();
 
     ///////////////////////////////////////////////////////
     ///    VARAIBLES
     ///////////////////////////////////////////////////////
     uint256 private constant PRECISION = 1e18;
     uint256 private constant PERCENTAGE_PRECISION = 100;
-    uint256 private percentage = 70;
+    uint256 private constant LTV_PERCENTAGE = 50;
+    uint256 private LIQUIDATION_THRESHOLD = 80;
     uint256 private minDeposit = 100e18; // $100
     uint256 public firstInterestRate = 2;
     uint256 public secondInterestRate = 5;
     uint256 public thirdInterestRate = 10;
     uint256 private firstQuotaPercent = 30;
     uint256 private secondQuotaPercent = 75;
-    uint256 private interests;
+    uint256 private idPosition;
+    mapping(address _token => uint256 _amount) private interestHistory;
 
     struct BorrowStatus {
-        uint256 amount;
-        uint256 borrow_time;
-        uint256 interest_rate;
-        uint256 interest;
+        bytes32 uniqueId;
         address collateralToken;
+        uint256 lockedCollateralAmount;
+        address debtToken;
+        uint256 debtAmount;
+        uint256 interestAmount;
+        uint256 startTime;
+        bool active;
     }
 
-    struct Against {
-        uint256 amount;
-        address tokenAgainst;
-    }
     // collateral
     mapping(address _user => mapping(address _token => uint256 _amount)) private collateral;
-    mapping(address _user => address[] tokens) private userCollateralTokens;
-    mapping(address => mapping(address => bool)) private hasCollateralToken;
 
     // debt
-    mapping(address _user => mapping(address _token => BorrowStatus[])) private debtPosition;
-    mapping(address _user => mapping(address _token => uint256 _amount)) private userDebt;
+    mapping(address _user => BorrowStatus[]) private debtPosition;
+    mapping(address _user => BorrowStatus[]) private debtHistory;
     mapping(address _token => uint256 _amount) private protocolDebt;
-    mapping(address _user => address[]) userBorrowedTokens;
-    mapping(address _user => mapping(address _token => bool)) public hasBorrowedToken;
-    mapping(address _user => mapping(address _collateralToken => Against[])) private debtAssociate;
 
     address[] private supportedTokens;
 
@@ -92,6 +92,45 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
         _;
     }
 
+    modifier oneTokenSupport(address _tokenOne) {
+        bool supported;
+        for (uint256 i = 0; i < supportedTokens.length; i++) {
+            if (_tokenOne == supportedTokens[i]) {
+                supported = true;
+                break;
+            }
+        }
+        if (!supported) {
+            revert Borrowing__NotSupportedToken();
+        }
+        _;
+    }
+
+    modifier twoTokensSupport(address _tokenOne, address _tokenSupportTwo) {
+        bool supportedOne;
+        bool supportedTwo;
+
+        for (uint256 i = 0; i < supportedTokens.length; i++) {
+            if (_tokenOne == supportedTokens[i]) {
+                supportedOne = true;
+            }
+
+            if (_tokenSupportTwo == supportedTokens[i]) {
+                supportedTwo = true;
+            }
+
+            if (supportedOne && supportedTwo) {
+                break;
+            }
+        }
+
+        if (!supportedOne || !supportedTwo) {
+            revert Borrowing__NotSupportedToken();
+        }
+
+        _;
+    }
+
     ///////////////////////////////////////////////////////
     ///    FUNCTIONS
     ///////////////////////////////////////////////////////
@@ -103,175 +142,219 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
         supportedTokens = oracle.getAllSupportedTokens();
     }
 
-    function depositCollateral(uint256 _amount, address _token) external override nonReentrant zeroCheck(_amount) {
+    function depositCollateral(uint256 _amount, address _token)
+        external
+        override
+        nonReentrant
+        zeroCheck(_amount)
+        oneTokenSupport(_token)
+    {
         // checks
-        bool supported;
-        for (uint256 i = 0; i < supportedTokens.length; i++) {
-            if (_token == supportedTokens[i]) {
-                supported = true;
-            }
-        }
-        if (!supported) {
-            revert Borrowing__NotSupportedToken();
-        }
-        uint256 worth = oracle.calculateTokenWorthInUsd(_token, _amount);
-        if (worth < minDeposit) {
+        uint256 collateralUsdWorth = oracle.calculateTokenWorthInUsd(_token, _amount);
+        if (collateralUsdWorth < minDeposit) {
             revert Borrowing__LessThanMinimumDeposit();
         }
 
         // effects
-        if (!hasCollateralToken[msg.sender][_token]) {
-            userCollateralTokens[msg.sender].push(_token);
-            hasCollateralToken[msg.sender][_token] = true;
-        }
         collateral[msg.sender][_token] += _amount;
 
         // interactions
         IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
     }
 
-    function borrow(uint256 _amount, address _borrowToken, address _collateral)
+    function borrow(address _collateralToken, uint256 _lockCollateralAmount, address _debtToken, uint256 _debtAmount)
         external
         override
         nonReentrant
-        zeroCheck(_amount)
+        zeroCheck(_debtAmount)
+        twoTokensSupport(_collateralToken, _debtToken)
     {
         // checks
-        if (_borrowToken == _collateral) {
+        if (_debtToken == _collateralToken) {
             revert Borrowing__CantBeSameToken();
         }
-        uint256 userCollateral = collateral[msg.sender][_collateral];
-        uint256 worth = oracle.calculateTokenWorthInUsd(_collateral, userCollateral);
-        if (worth < minDeposit) {
+        uint256 userCollateralViaSingleToken = collateral[msg.sender][_collateralToken];
+        uint256 collateralUsdWorth = oracle.calculateTokenWorthInUsd(_collateralToken, userCollateralViaSingleToken);
+        if (collateralUsdWorth < minDeposit) {
             revert Borrowing__LessThanMinimumCollateralWorth();
         }
 
-        uint256 borrowLimit = (worth * percentage) / PERCENTAGE_PRECISION;
-
-        address[] storage tokens = userBorrowedTokens[msg.sender];
-        uint256 currentDebt;
-        for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 tokenAmount = userDebt[msg.sender][tokens[i]];
-            currentDebt += oracle.calculateTokenWorthInUsd(tokens[i], tokenAmount);
+        uint256 debtUsdWorth = oracle.calculateTokenWorthInUsd(_debtToken, _debtAmount);
+        uint256 lockCollateralUsdWorth = oracle.calculateTokenWorthInUsd(_collateralToken, _lockCollateralAmount);
+        if (!(debtUsdWorth * 2 <= lockCollateralUsdWorth)) {
+            revert Borrowing__CollateralMustBeTwiceAsDebt();
         }
-        uint256 interest = _interest(_amount, _borrowToken);
-        uint256 totalLoan = interest + _amount;
-        uint256 _amountInUsd = oracle.calculateTokenWorthInUsd(_borrowToken, totalLoan);
-        if (currentDebt + _amountInUsd > borrowLimit) {
+
+        uint256 borrowLimit = (lockCollateralUsdWorth * LTV_PERCENTAGE) / PERCENTAGE_PRECISION;
+        uint256 interest = _interest(_debtAmount, _debtToken);
+        uint256 totalLoan = interest + _debtAmount;
+        uint256 totalLoanUsdWorth = oracle.calculateTokenWorthInUsd(_debtToken, totalLoan);
+        if (totalLoanUsdWorth > borrowLimit) {
             revert Borrowing__CantBorrowMoreThanLimit();
         }
 
         // effects
-        debtPosition[msg.sender][_borrowToken].push(
+
+        uint256 newId = ++idPosition;
+        bytes32 hashedId = keccak256(abi.encode(address(this), newId));
+        debtPosition[msg.sender].push(
             BorrowStatus({
-                amount: totalLoan,
-                borrow_time: block.timestamp,
-                interest_rate: _interestRate(_borrowToken),
-                interest: interest,
-                collateralToken: _collateral
+                uniqueId: hashedId,
+                collateralToken: _collateralToken,
+                lockedCollateralAmount: _lockCollateralAmount,
+                debtToken: _debtToken,
+                debtAmount: totalLoan,
+                interestAmount: interest,
+                startTime: block.timestamp,
+                active: true
             })
         );
-        interests += interest;
-        userDebt[msg.sender][_borrowToken] += totalLoan;
+        debtHistory[msg.sender].push(
+            BorrowStatus({
+                uniqueId: hashedId,
+                collateralToken: _collateralToken,
+                lockedCollateralAmount: _lockCollateralAmount,
+                debtToken: _debtToken,
+                debtAmount: totalLoan,
+                interestAmount: interest,
+                startTime: block.timestamp,
+                active: true
+            })
+        );
 
-        Against[] storage debts = debtAssociate[msg.sender][_collateral];
+        lend.recordBorrow(msg.sender, hashedId, _debtToken, _collateralToken, _debtAmount, totalLoan, interest);
 
-        bool found;
+        collateral[msg.sender][_collateralToken] -= _lockCollateralAmount;
+        protocolDebt[_debtToken] += _debtAmount;
 
-        for (uint256 i = 0; i < debts.length; i++) {
-            if (debts[i].tokenAgainst == _borrowToken) {
-                debts[i].amount += totalLoan;
-                found = true;
-                break;
+        // interactions
+        lend.releaseBorrowedTokens(_debtToken, msg.sender, _debtAmount);
+    }
+
+    function clearPosition(uint256 _positionIndex, uint256 _amount) external override nonReentrant zeroCheck(_amount) {
+        BorrowStatus[] storage position = debtPosition[msg.sender];
+
+        if (_positionIndex >= position.length) {
+            revert Borrowing__InvalidPosition();
+        }
+
+        // checks
+
+        if (position[_positionIndex].debtAmount == 0) {
+            revert Borrowing__PositionCleared();
+        }
+
+        if (_amount != position[_positionIndex].debtAmount) {
+            revert Borrowing__IncorrectRepaymentAmount();
+        }
+
+        // effects
+        address collateralToken = position[_positionIndex].collateralToken;
+        address debtToken = position[_positionIndex].debtToken;
+        uint256 lockedCollateral = position[_positionIndex].lockedCollateralAmount;
+        bytes32 uniqueId = position[_positionIndex].uniqueId;
+        uint256 repaymentAmount = position[_positionIndex].debtAmount;
+
+        collateral[msg.sender][collateralToken] += lockedCollateral;
+        position[_positionIndex].debtAmount -= _amount;
+
+        if (position[_positionIndex].debtAmount == 0) {
+            for (uint256 i = _positionIndex; i < position.length - 1; i++) {
+                position[i] = position[i + 1];
             }
-        }
-
-        if (!found) {
-            debts.push(Against({amount: totalLoan, tokenAgainst: _borrowToken}));
-        }
-
-        protocolDebt[_borrowToken] += _amount;
-
-        if (!hasBorrowedToken[msg.sender][_borrowToken]) {
-            userBorrowedTokens[msg.sender].push(_borrowToken);
-            hasBorrowedToken[msg.sender][_borrowToken] = true;
+            position.pop();
         }
 
         // interactions
-        lend.releaseBorrowedTokens(_borrowToken, msg.sender, _amount);
+        lend.receiveRepayment(msg.sender, uniqueId, repaymentAmount);
     }
 
-    function repay(address _token, uint256 _positionId, uint256 _amount)
+    function withdraw(address _token, uint256 _amount)
         external
         override
         nonReentrant
         zeroCheck(_amount)
+        oneTokenSupport(_token)
     {
-        BorrowStatus storage position = debtPosition[msg.sender][_token][_positionId];
-
-        // CHECKS
-        if (userDebt[msg.sender][_token] == 0) {
-            revert Borrowing__NoDebtForToken();
-        }
-
-        if (position.amount == 0) {
-            revert Borrowing__LoanPositionCleared();
-        }
-
-        if (_amount > position.amount) {
-            revert Borrowing__NotEnoughWithdrawableBalance();
-        }
-
-        // EFFECTS
-        position.amount -= _amount;
-        userDebt[msg.sender][_token] -= _amount;
-        if (position.amount == 0) {
-            delete debtPosition[msg.sender][_token][_positionId];
-        }
-
-        // INTERACTIONS
-        IERC20(_token).safeTransferFrom(msg.sender, address(lend), _amount);
-    }
-
-    function withdraw(address _token, uint256 _amount) external override nonReentrant zeroCheck(_amount) {
-        (uint256 amount, uint256 amountInUsd) = getWithdrawableBalance(_token);
+        // checks
         if (collateral[msg.sender][_token] == 0) {
             revert Borrowing__NoCurrentCollateral();
         }
-        if (_amount > amount) {
+        if (_amount > collateral[msg.sender][_token]) {
             revert Borrowing__NotEnoughWithdrawableBalance();
         }
 
+        // effects
         collateral[msg.sender][_token] -= _amount;
 
+        // interaction
         IERC20(_token).safeTransfer(msg.sender, _amount);
     }
 
-    function liquidate(address _user, uint256 _amount) external {}
+    function liquidate(address _user, uint256 _positionIndex, uint256 _amount)
+        external
+        nonReentrant
+        zeroCheck(_amount)
+    {
+        BorrowStatus storage position = debtPosition[_user][_positionIndex];
+        BorrowStatus[] storage debtPositions = debtPosition[_user];
+        uint256 debtAmount = position.debtAmount;
+        address debtToken = position.debtToken;
+        address collateralToken = position.collateralToken;
+
+        if (_positionIndex >= debtPositions.length) {
+            revert Borrowing__InvalidPosition();
+        }
+        bool safe = _isSafe(_user, _positionIndex);
+
+        if (safe) {
+            revert Borrowing__UserNotLiquidatable();
+        }
+
+        if (_amount > debtAmount) revert Borrowing__LiquidationOutOfBound();
+
+        uint256 liquidationBonus = (_amount * LIQUIDATION_THRESHOLD) / PERCENTAGE_PRECISION;
+        uint256 totalLiquidation = _amount + liquidationBonus;
+        bytes32 uniqueId = position.uniqueId;
+        uint256 lockedCollateral = position.lockedCollateralAmount;
+        uint256 lockedCollateralInUsd = oracle.calculateTokenWorthInUsd(position.collateralToken, lockedCollateral);
+
+        uint256 liquidationInUsd = oracle.calculateTokenWorthInUsd(debtToken, totalLiquidation);
+
+        uint256 liquidationInCollateralAmount = oracle.usdWorthToTokenAmount(collateralToken, liquidationInUsd);
+
+        if (debtAmount == _amount) {
+            for (uint256 i = _positionIndex; i < debtPositions.length - 1; i++) {
+                debtPositions[i] = debtPositions[i + 1];
+            }
+            debtPositions.pop();
+        } else {
+            position.debtAmount -= _amount;
+        }
+
+        position.lockedCollateralAmount -= liquidationInCollateralAmount;
+        protocolDebt[debtToken] -= _amount;
+
+        lend.updateBorrowRecord(_user, _amount, position.uniqueId);
+
+        IERC20(debtToken).safeTransferFrom(msg.sender, address(lend), _amount);
+        IERC20(collateralToken).safeTransfer(msg.sender, liquidationInCollateralAmount);
+    }
+
+    function _isSafe(address _user, uint256 _positionIndex) internal view returns (bool) {
+        // checks if user is safe
+        BorrowStatus storage position = debtPosition[_user][_positionIndex];
+        uint256 lockedCollateralAmount = position.lockedCollateralAmount;
+        uint256 collateralInUsd = oracle.calculateTokenWorthInUsd(position.collateralToken, lockedCollateralAmount);
+        uint256 debtInUsd = oracle.calculateTokenWorthInUsd(position.debtToken, position.debtAmount);
+        uint256 threshold = (collateralInUsd * LIQUIDATION_THRESHOLD) / PERCENTAGE_PRECISION;
+
+        return threshold > debtInUsd;
+    }
 
     ///////////////////////////////////////////////////////
     ///    HELPERS
     ///////////////////////////////////////////////////////
-    function getWithdrawableBalance(address _token) public view override returns (uint256 amount, uint256 amountInUsd) {
-        uint256 _collateral = collateral[msg.sender][_token];
-        uint256 worth = oracle.calculateTokenWorthInUsd(_token, _collateral);
-        uint256 debtInUsd;
-
-        Against[] storage debts = debtAssociate[msg.sender][_token];
-
-        for (uint256 i = 0; i < debts.length; i++) {
-            debtInUsd += oracle.calculateTokenWorthInUsd(debts[i].tokenAgainst, debts[i].amount);
-        }
-
-        // debt/LTV
-        uint256 minimumCollateralUsd = Math.mulDiv(debtInUsd, PERCENTAGE_PRECISION, percentage, Math.Rounding.Ceil);
-
-        if (minimumCollateralUsd >= worth) {
-            return (0, 0);
-        }
-        amountInUsd = worth - minimumCollateralUsd;
-        amount = oracle.usdWorthToTokenAmount(_token, amountInUsd);
-    }
 
     function _interest(uint256 _amount, address _token) public view override returns (uint256) {
         uint256 amountInUsd = oracle.calculateTokenWorthInUsd(_token, _amount);
@@ -283,11 +366,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
         }
 
         uint256 interestInUsd = Math.mulDiv(amountInUsd, rate, PERCENTAGE_PRECISION);
-        uint8 tokenDecimals = IERC20Metadata(_token).decimals();
-        uint256 tokenPrecision = 10 ** uint256(tokenDecimals);
-        uint256 tokenPrice = oracle.getPriceInUsd(_token);
-
-        return Math.mulDiv(interestInUsd, tokenPrecision, tokenPrice);
+        return oracle.usdWorthToTokenAmount(_token, interestInUsd);
     }
 
     function _interestRate(address _token) public view override returns (uint256) {

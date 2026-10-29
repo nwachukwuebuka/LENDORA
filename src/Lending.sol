@@ -11,6 +11,7 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 import {IPriceFeedOracle} from "./interfaces/IPriceFeedOracle.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  ***@author Nwachukwu Chukwuebuka
@@ -20,7 +21,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  ***         remaining 40% as protocol liquidity.
  ***@dev Manages lending positions, withdrawals, lock durations, and early-withdrawal penalties.
  */
-contract Lending is ILending, Ownable, ReentrancyGuard {
+abstract contract Lending is ILending, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     ///////////////////////////////////////////////////////
@@ -35,11 +36,20 @@ contract Lending is ILending, Ownable, ReentrancyGuard {
     error Lending__InvalidAddress();
     error Lending__BorrowingAlreadySet();
     error Lending__NotBorrowingContract();
+    error Lending__InvalidTransactionId();
+    error Lending__IncorrectRepaymentAmount();
+    error Lending__AmountCantBeZero();
+    error Lending__WithdrawalPending();
+    error Lending__InsufficientBalance();
+    error  Lending__LiquidationOutOfBound();
+
+
 
     ///////////////////////////////////////////////////////
     ///    VARIABLES
     /////////////////////////////////////////////////////
-    uint256 private constant PERCENTAGE_PRECSION = 100;
+    uint256 private constant PERCENTAGE_PRECISION = 100;
+    uint256 private withdrawTime = 43_200;
     uint256 public lendersRewardPercent = 40;
     uint256 public lockDuration = 7_257_600; //84 days
     uint256 public penaltyRate = 5; // 5%
@@ -51,9 +61,29 @@ contract Lending is ILending, Ownable, ReentrancyGuard {
         uint256 amount;
         uint256 startTime;
     }
+
+    struct PendingWithdrawal {
+        uint256 amount;
+        uint256 positionId;
+        uint256 requestime;
+        bool stillPending;
+    }
+
+    struct BorrowRecord {
+        bytes32 uniqueId;
+        address debtToken;
+        address collateralToken;
+        uint256 principal;
+        uint256 totalAmount;
+        uint256 interest;
+    }
     mapping(address user => mapping(address token => LendingPosition[])) private position;
+    mapping(address user => mapping(address token => PendingWithdrawal[])) private pendingWithdrawals;
+    mapping(address user => mapping(address token => uint256 amount)) private withdrawalBalance;
     IPriceFeedOracle private priceOracle;
     address public borrowingContract;
+    mapping(address _user => BorrowRecord[]) private borrowRecords;
+    mapping(address _token => uint256 _amount) private interests;
 
     ///////////////////////////////////////////////////////
     ///    MODIFIERS
@@ -64,6 +94,13 @@ contract Lending is ILending, Ownable, ReentrancyGuard {
         }
         _;
     }
+    modifier zeroCheck(uint256 _amount) {
+    if (_amount == 0) {
+        revert Lending__AmountCantBeZero();
+    }
+    _;
+}
+
 
     ///////////////////////////////////////////////////////
     ///    FUNCTIONS
@@ -91,7 +128,43 @@ contract Lending is ILending, Ownable, ReentrancyGuard {
         position[msg.sender][_token].push(LendingPosition({amount: _amount, startTime: block.timestamp}));
         depositRecord[msg.sender][_token] += _amount;
 
+        // totalLent[_token] += _amount;
+        // if (!isPoolLender[_token][msg.sender]) {
+        //     poolLenders[_token].push(msg.sender);
+        //     isPoolLender[_token][msg.sender] = true;
+        // }
+        // if (lastInterestDistribution[_token] == 0) {
+        //     lastInterestDistribution[_token] = block.timestamp;
+        // }
+
         IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
+    }
+
+    function withdraw(address _token, uint256 _position, uint256 _amount) external nonReentrant zeroCheck(_amount) {
+    
+        PendingWithdrawal[] storage pend = pendingWithdrawals[msg.sender][_token];
+
+        for (uint256 i = 0; i < pend.length; i++) {
+            if (pend[i].positionId == _position && pend[i].stillPending) {
+                revert Lending__WithdrawalPending();
+            }
+        }
+
+        uint256 withdrawable = withdrawalBalance[msg.sender][_token];
+
+        uint256 percentWith = (withdrawable * 30) / PERCENTAGE_PRECISION;
+
+        //INTERACTIONS
+        if (percentWith >= _amount) {
+            withdrawalBalance[msg.sender][_token] -= _amount;
+            IERC20(_token).safeTransfer(msg.sender, _amount);
+        } else {
+            pendingWithdrawals[msg.sender][_token].push(
+                PendingWithdrawal({
+                    amount: _amount, positionId: _position, requestime: block.timestamp, stillPending: true
+                })
+            );
+        }
     }
 
     /// @notice Withdraws tokens from an existing lending position.
@@ -99,7 +172,7 @@ contract Lending is ILending, Ownable, ReentrancyGuard {
     ///      records, and transfers the remaining amount to the user.
     /// @param _token The address of the token associated with the position.
     /// @param _position The 1-based index of the lending position to withdraw.
-    function withdraw(address _token, uint256 _position) external override nonReentrant {
+    function cancelPosition(address _token, uint256 _position) external override {
         //CHECKS
         if (_position < 1) {
             revert Lending__PositionLessThanOne();
@@ -115,13 +188,15 @@ contract Lending is ILending, Ownable, ReentrancyGuard {
         if (queriedPos.amount == 0) {
             revert Lending__PositionAlreadyWithdrawn();
         }
+
         uint256 lendAmount = queriedPos.amount;
         uint256 penalty = _penalty(queriedPos);
         uint256 withdrawal = lendAmount - penalty;
 
+        // for protocol
         uint256 totalPenalty = lendAmount - withdrawal;
 
-        uint256 penaltyFees = (totalPenalty * lendersRewardPercent) / PERCENTAGE_PRECSION;
+        uint256 penaltyFees = (totalPenalty * lendersRewardPercent) / PERCENTAGE_PRECISION;
 
         //EFFECTS
         //update the position
@@ -131,12 +206,101 @@ contract Lending is ILending, Ownable, ReentrancyGuard {
         //record penalty fee
         penaltyReward[_token] += penaltyFees;
 
-        //INTERACTIONS
-        IERC20(_token).safeTransfer(msg.sender, withdrawal);
+        // SUB INTERACTION
+        withdrawalBalance[msg.sender][_token] += withdrawal;
     }
 
-    function releaseBorrowedTokens(address _token, address _receiver, uint256 _amount) external onlyBorrowingContract {
+    function releaseBorrowedTokens(address _token, address _receiver, uint256 _amount)
+        external
+        nonReentrant
+        onlyBorrowingContract
+    {
         IERC20(_token).safeTransfer(_receiver, _amount);
+    }
+
+    function receiveRepayment(address borrower, bytes32 uniqueId, uint256 amount)
+        external
+        nonReentrant
+        onlyBorrowingContract
+    {
+        BorrowRecord[] storage record = borrowRecords[borrower];
+        uint256 index;
+        bool found;
+
+        for (uint256 i = 0; i < record.length; i++) {
+            if (record[i].uniqueId == uniqueId) {
+                index = i;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) revert Lending__InvalidTransactionId();
+
+        uint256 repayment = record[index].totalAmount;
+        address debtToken = record[index].debtToken;
+
+        if (repayment != amount) revert Lending__IncorrectRepaymentAmount();
+
+        interests[record[index].debtToken] += record[index].interest;
+
+        for (uint256 i = index; i < record.length - 1; i++) {
+            record[i] = record[i + 1];
+        }
+        record.pop();
+
+        IERC20(debtToken).safeTransferFrom(borrower, address(this), amount);
+    }
+
+    function updateBorrowRecord(address _user, uint256 _amount, bytes32 _uniqueId) external onlyBorrowingContract {
+        BorrowRecord[] storage debtRecords = borrowRecords[_user];
+        uint256 index;
+        bool found;
+        for (uint256 i = 0; i < debtRecords.length; i++) {
+            if (debtRecords[i].uniqueId == _uniqueId) {
+                index = i;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) revert Lending__InvalidTransactionId();
+
+        BorrowRecord storage record = borrowRecords[_user][index];
+        uint256 debt = record.totalAmount;
+        if (_amount > record.totalAmount) {
+            revert Lending__LiquidationOutOfBound();
+        }
+
+        if (debt == _amount) {
+            for (uint256 i = index; i < debtRecords.length - 1; i++) {
+                debtRecords[i] = debtRecords[i + 1];
+            }
+            debtRecords.pop();
+        } else {
+            record.totalAmount -= _amount;
+        }
+    }
+
+    function recordBorrow(
+        address _borrower,
+        bytes32 _positionId,
+        address _debtToken,
+        address _collateralToken,
+        uint256 _requestedLoan,
+        uint256 _repayAmount,
+        uint256 _interest
+    ) external  onlyBorrowingContract {
+        borrowRecords[_borrower].push(
+            BorrowRecord({
+                uniqueId: _positionId,
+                debtToken: _debtToken,
+                collateralToken: _collateralToken,
+                principal: _requestedLoan,
+                totalAmount: _repayAmount,
+                interest: _interest
+            })
+        );
     }
 
     ///////////////////////////////////////////////////////
