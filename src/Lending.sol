@@ -164,7 +164,17 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
 
         LendingPosition[] storage positions = lentPositions[msg.sender][_token];
 
-        pendingBoxes[_token][_id].push(PendingBox({lender: msg.sender, amount: _amount, id: _id, pending: true, interestAvailable: false, interestClaimed: false, startTime: timestampHolder}));
+        pendingBoxes[_token][_id].push(
+            PendingBox({
+                lender: msg.sender,
+                amount: _amount,
+                id: _id,
+                pending: true,
+                interestAvailable: false,
+                interestClaimed: false,
+                startTime: timestampHolder
+            })
+        );
         PendingBox[] storage box = pendingBoxes[_token][_id];
 
         if (box.length == MAX_IN_BOX) {
@@ -340,9 +350,8 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
 
         if (repayment != amount) revert Lending__IncorrectRepaymentAmount();
 
-        for(uint256 i = 0; i < box.length; i++){
+        for (uint256 i = 0; i < box.length; i++) {
             box[i].interestAvailable = true;
-
         }
 
         interestHistory[record[index].debtToken] += record[index].interest;
@@ -378,10 +387,9 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
         if (debt == _amount) {
             for (uint256 i = index; i < debtRecords.length - 1; i++) {
                 debtRecords[i] = debtRecords[i + 1];
-
             }
             debtRecords.pop();
-        } 
+        }
     }
 
     function recordBorrow(
@@ -405,7 +413,7 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
         );
     }
 
-    function _distributeInterest(address token, uint256 boxIndex) internal zeroCheck(boxIndex){
+    function _distributeInterest(address token, uint256 boxIndex) internal zeroCheck(boxIndex) {
         uint256 index = boxIndex - 1;
 
         bytes32 id = IDs[token][index];
@@ -415,18 +423,17 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
         PendingBox[] storage pend = pendingBoxes[token][id];
         address[] memory lenders = new address[](20);
 
-        if(!pend[0].interestAvailable){
+        if (!pend[0].interestAvailable) {
             revert Lending__NoAvailableInterest();
         }
 
-        if(block.timestamp - pend[0].startTime < lockDuration){
+        if (block.timestamp - pend[0].startTime < lockDuration) {
             revert Lending__NoAvailableInterest();
         }
 
         for (uint256 i = 0; i < pend.length; i++) {
             amount += pend[i].amount;
         }
-
 
         for (uint256 i = 0; i < pend.length; i++) {
             lenders[i] = pend[i].lender;
@@ -511,7 +518,7 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
     ///    GETTERS
     ///////////////////////////////////////////////////////
 
-    function getLiquidity(address _token) public view returns (uint256){
+    function getLiquidity(address _token) public view returns (uint256) {
         return Math.mulDiv(poolBalance[_token], POOL_AVAILABILITY, PERCENTAGE_PRECISION);
     }
 
@@ -522,18 +529,18 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
         return IDs[token][number];
     }
 
-    function getLendStatus(bytes32 _id, address _token) public view returns(string memory){
+    function getLendStatus(bytes32 _id, address _token) public view returns (string memory) {
         PendingBox[] storage box = pendingBoxes[_token][_id];
 
         uint256 index;
-        for(uint256 i = 0; i < box.length; i++){
-            if(box[i].id == _id){
+        for (uint256 i = 0; i < box.length; i++) {
+            if (box[i].id == _id) {
                 index = i;
                 break;
             }
         }
-        
-        if(pendingBoxes[_token][_id][index].pending == false){
+
+        if (pendingBoxes[_token][_id][index].pending == false) {
             return "In Position";
         }
         return "Pending";
