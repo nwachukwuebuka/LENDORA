@@ -42,21 +42,28 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
     error Lending__WithdrawalPending();
     error Lending__InsufficientBalance();
     error Lending__LiquidationOutOfBound();
+    error Lending__ProtocolLendingLimit();
+    error Lending__LendingBoxesExceeded();
+    error Lending__NoInterestToClaim();
+    error Lending__LessThanMinimalAmountOrTokenNotSupported();
+    error Lending__NoAvailableInterest();
 
     ///////////////////////////////////////////////////////
-    ///    VARIABLES
-    /////////////////////////////////////////////////////
-    uint256 private constant PERCENTAGE_PRECISION = 100;
-    uint256 private withdrawTime = 43_200;
-    uint256 public lendersRewardPercent = 40;
-    uint256 public lockDuration = 7_257_600; //84 days
-    uint256 public penaltyRate = 5; // 5%
-    uint256 public minimumDeposit = 1000e18; //$1000
-    mapping(address token => uint256 fees) private penaltyReward;
-    mapping(address user => mapping(address token => uint256 depositedAmount)) private depositRecord;
-
+    ///    CUSTOM TYPES
+    ///////////////////////////////////////////////////////
     struct LendingPosition {
         uint256 amount;
+        bytes32 id;
+        uint256 startTime;
+    }
+
+    struct PendingBox {
+        address lender;
+        uint256 amount;
+        bytes32 id;
+        bool pending;
+        bool interestAvailable;
+        bool interestClaimed;
         uint256 startTime;
     }
 
@@ -75,13 +82,42 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
         uint256 totalAmount;
         uint256 interest;
     }
-    mapping(address user => mapping(address token => LendingPosition[])) private position;
+
+    ///////////////////////////////////////////////////////
+    ///    VARIABLES
+    //////////////////////////////////////////////////////
+
+    // LEND
+    uint256 private constant PERCENTAGE_PRECISION = 100;
+    uint256 private timestampHolder;
+    uint256 private withdrawTime = 43_200;
+    uint256 public box20percent = 50;
+    uint256 private constant POOL_AVAILABILITY = 80;
+    uint256 public lockDuration = 84 days;
+    uint256 public penaltyRate = 5; // 5%
+    uint256 public minimumDeposit = 1000e18; //$1000
+    mapping(address user => mapping(address token => uint256 depositedAmount)) private depositRecord;
+    uint256 private pendedBox;
+    uint256 private constant MAX_IN_BOX = 20;
+    mapping(address _token => mapping(bytes32 _id => PendingBox[])) private pendingBoxes;
+    mapping(address _token => uint256 _amount) public poolBalance;
+    mapping(address _token => address[] _lender) private poolLenders;
+    mapping(address user => mapping(address token => LendingPosition[])) private lentPositions;
+    mapping(address user => mapping(address token => LendingPosition[])) private lendHistory;
     mapping(address user => mapping(address token => PendingWithdrawal[])) private pendingWithdrawals;
-    mapping(address user => mapping(address token => uint256 amount)) private withdrawalBalance;
+    mapping(address token => mapping(bytes32 id => uint256 amount)) private remainsOfCurrentBox;
+    mapping(address token => bytes32[] id) private IDs;
+    mapping(address token => mapping(bytes32 id => uint256 amount)) private boxPenaltyReward;
+    mapping(address lender => mapping(address token => uint256 amount)) private interestShare;
+    bytes32 private currentIdToRelease;
+    uint256 idIndex;
+
+    // BORROWERS COPY
+    mapping(address user => mapping(address token => uint256 amount)) private neutralBalance;
     IPriceFeedOracle private priceOracle;
     address public borrowingContract;
     mapping(address _user => BorrowRecord[]) private borrowRecords;
-    mapping(address _token => uint256 _amount) private interests;
+    mapping(address _token => uint256 _amount) private interestHistory;
 
     ///////////////////////////////////////////////////////
     ///    MODIFIERS
@@ -116,23 +152,40 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
     /// @param _token The address of the token to lend.
     /// @param _amount The amount of tokens to deposit.
     function lend(uint256 _amount, address _token) external override nonReentrant {
+        timestampHolder = block.timestamp;
+        uint256 boxNumber = pendedBox++;
+        bytes32 _id = keccak256(abi.encode(timestampHolder, boxNumber));
         bool supportedToken = priceOracle.isTokenSupported(_token);
         uint256 worth = priceOracle.calculateTokenWorthInUsd(_token, _amount);
 
         if (!supportedToken || (worth < minimumDeposit)) {
-            revert Lending__LessThanMinimalAmount();
+            revert Lending__LessThanMinimalAmountOrTokenNotSupported();
         }
-        position[msg.sender][_token].push(LendingPosition({amount: _amount, startTime: block.timestamp}));
+
+        LendingPosition[] storage positions = lentPositions[msg.sender][_token];
+
+        pendingBoxes[_token][_id].push(PendingBox({lender: msg.sender, amount: _amount, id: _id, pending: true, interestAvailable: false, interestClaimed: false, startTime: timestampHolder}));
+        PendingBox[] storage box = pendingBoxes[_token][_id];
+
+        if (box.length == MAX_IN_BOX) {
+            for (uint256 i = 0; i < box.length; i++) {
+                lentPositions[box[i].lender][_token].push(
+                    LendingPosition({amount: box[i].amount, id: box[i].id, startTime: block.timestamp})
+                );
+                lendHistory[box[i].lender][_token].push(
+                    LendingPosition({amount: box[i].amount, id: box[i].id, startTime: block.timestamp})
+                );
+                box[i].pending = false;
+            }
+
+            timestampHolder = 0;
+        }
+        IDs[_token].push(currentIdToRelease);
+        _id = currentIdToRelease;
+
         depositRecord[msg.sender][_token] += _amount;
 
-        // totalLent[_token] += _amount;
-        // if (!isPoolLender[_token][msg.sender]) {
-        //     poolLenders[_token].push(msg.sender);
-        //     isPoolLender[_token][msg.sender] = true;
-        // }
-        // if (lastInterestDistribution[_token] == 0) {
-        //     lastInterestDistribution[_token] = block.timestamp;
-        // }
+        poolBalance[_token] += _amount;
 
         IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
     }
@@ -146,13 +199,13 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
             }
         }
 
-        uint256 withdrawable = withdrawalBalance[msg.sender][_token];
+        uint256 withdrawable = neutralBalance[msg.sender][_token];
 
         uint256 percentWith = (withdrawable * 30) / PERCENTAGE_PRECISION;
 
         //INTERACTIONS
         if (percentWith >= _amount) {
-            withdrawalBalance[msg.sender][_token] -= _amount;
+            neutralBalance[msg.sender][_token] -= _amount;
             IERC20(_token).safeTransfer(msg.sender, _amount);
         } else {
             pendingWithdrawals[msg.sender][_token].push(
@@ -168,49 +221,97 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
     ///      records, and transfers the remaining amount to the user.
     /// @param _token The address of the token associated with the position.
     /// @param _position The 1-based index of the lending position to withdraw.
-    function cancelPosition(address _token, uint256 _position) external override {
-        //CHECKS
-        if (_position < 1) {
-            revert Lending__PositionLessThanOne();
-        }
-        uint256 positionId = _position - 1;
+    function cancelPosition(address _token, uint256 _position) external override zeroCheck(_position) {
+        // checks
+        uint256 positionIndex = _position - 1;
+        LendingPosition storage position = lentPositions[msg.sender][_token][positionIndex];
+        LendingPosition[] storage positions = lentPositions[msg.sender][_token];
 
-        if (positionId >= position[msg.sender][_token].length) {
+        bytes32 boxId = position.id;
+        PendingBox[] storage box = pendingBoxes[_token][boxId];
+        uint256 lentAmount = position.amount;
+
+        uint256 penalty = _penalty(position);
+        uint256 index;
+
+        if (positionIndex >= positions.length) {
             revert Lending__PositionDoesNotExist();
         }
 
-        LendingPosition storage queriedPos = position[msg.sender][_token][positionId];
-
-        if (queriedPos.amount == 0) {
+        if (lentAmount == 0) {
             revert Lending__PositionAlreadyWithdrawn();
         }
 
-        uint256 lendAmount = queriedPos.amount;
-        uint256 penalty = _penalty(queriedPos);
-        uint256 withdrawal = lendAmount - penalty;
+        uint256 withdrawal = lentAmount - penalty;
 
-        // for protocol
-        uint256 totalPenalty = lendAmount - withdrawal;
+        uint256 Box20Reward = (penalty * box20percent) / PERCENTAGE_PRECISION;
 
-        uint256 penaltyFees = (totalPenalty * lendersRewardPercent) / PERCENTAGE_PRECISION;
+        for (uint256 i = 0; i < box.length; i++) {
+            if (box[i].id == boxId) {
+                index = i;
+                break;
+            }
+        }
+
+        boxPenaltyReward[_token][boxId] = Box20Reward;
 
         //EFFECTS
         //update the position
-        delete position[msg.sender][_token][positionId];
+        delete lentPositions[msg.sender][_token][positionIndex];
+        delete pendingBoxes[_token][boxId][index];
         //update total deposit
-        depositRecord[msg.sender][_token] -= lendAmount;
-        //record penalty fee
-        penaltyReward[_token] += penaltyFees;
+        depositRecord[msg.sender][_token] -= lentAmount;
 
         // SUB INTERACTION
-        withdrawalBalance[msg.sender][_token] += withdrawal;
+        neutralBalance[msg.sender][_token] += withdrawal;
     }
 
     function releaseBorrowedTokens(address _token, address _receiver, uint256 _amount)
         external
         nonReentrant
         onlyBorrowingContract
+        zeroCheck(_amount)
     {
+        uint256 poolAmount = poolBalance[_token];
+
+        uint256 pool20 = (20 * poolAmount) / 100;
+
+        if (pool20 <= _amount) revert Lending__ProtocolLendingLimit();
+
+        uint256 index2 = ++idIndex;
+
+        PendingBox[] storage pend = pendingBoxes[_token][currentIdToRelease];
+        PendingBox[] storage pend2 = pendingBoxes[_token][currentIdToRelease];
+
+        uint256 boxAmount;
+        uint256 box2Amount;
+
+        for (uint256 i = 0; i < pend.length; i++) {
+            boxAmount += pend[i].amount;
+            box2Amount += pend2[i].amount;
+        }
+
+        if (_amount > boxAmount + box2Amount) {
+            revert Lending__LendingBoxesExceeded();
+        }
+
+        if (_amount == boxAmount) {
+            remainsOfCurrentBox[_token][IDs[_token][idIndex]];
+            ++idIndex;
+            currentIdToRelease = IDs[_token][idIndex];
+        }
+        if (_amount > boxAmount) {
+            if (_amount == boxAmount + box2Amount) {
+                remainsOfCurrentBox[_token][IDs[_token][idIndex]] == 0;
+                ++idIndex;
+                currentIdToRelease = IDs[_token][idIndex];
+            } else {
+                remainsOfCurrentBox[_token][IDs[_token][idIndex]] == (boxAmount + box2Amount) - _amount;
+            }
+        }
+        remainsOfCurrentBox[_token][IDs[_token][idIndex]] = boxAmount - _amount;
+        poolBalance[_token] -= _amount;
+
         IERC20(_token).safeTransfer(_receiver, _amount);
     }
 
@@ -235,10 +336,16 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
 
         uint256 repayment = record[index].totalAmount;
         address debtToken = record[index].debtToken;
+        PendingBox[] storage box = pendingBoxes[debtToken][uniqueId];
 
         if (repayment != amount) revert Lending__IncorrectRepaymentAmount();
 
-        interests[record[index].debtToken] += record[index].interest;
+        for(uint256 i = 0; i < box.length; i++){
+            box[i].interestAvailable = true;
+
+        }
+
+        interestHistory[record[index].debtToken] += record[index].interest;
 
         for (uint256 i = index; i < record.length - 1; i++) {
             record[i] = record[i + 1];
@@ -271,11 +378,10 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
         if (debt == _amount) {
             for (uint256 i = index; i < debtRecords.length - 1; i++) {
                 debtRecords[i] = debtRecords[i + 1];
+
             }
             debtRecords.pop();
-        } else {
-            record.totalAmount -= _amount;
-        }
+        } 
     }
 
     function recordBorrow(
@@ -299,6 +405,46 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
         );
     }
 
+    function _distributeInterest(address token, uint256 boxIndex) internal zeroCheck(boxIndex){
+        uint256 index = boxIndex - 1;
+
+        bytes32 id = IDs[token][index];
+        uint256 Box20Reward = boxPenaltyReward[token][id];
+        uint256 amount;
+
+        PendingBox[] storage pend = pendingBoxes[token][id];
+        address[] memory lenders = new address[](20);
+
+        if(!pend[0].interestAvailable){
+            revert Lending__NoAvailableInterest();
+        }
+
+        if(block.timestamp - pend[0].startTime < lockDuration){
+            revert Lending__NoAvailableInterest();
+        }
+
+        for (uint256 i = 0; i < pend.length; i++) {
+            amount += pend[i].amount;
+        }
+
+
+        for (uint256 i = 0; i < pend.length; i++) {
+            lenders[i] = pend[i].lender;
+            interestShare[lenders[i]][token] = (pend[i].amount + Box20Reward) / amount;
+            pend[i].interestAvailable = false;
+        }
+    }
+
+    function claimInterest(address lender, address token) external {
+        uint256 amount = interestShare[lender][token];
+
+        if (amount == 0) {
+            revert Lending__NoInterestToClaim();
+        }
+
+        neutralBalance[msg.sender][token] += amount;
+    }
+
     ///////////////////////////////////////////////////////
     ///    HELPERS
     ///////////////////////////////////////////////////////
@@ -309,14 +455,16 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
     /// @param queriedPos The lending position being evaluated.
     /// @return penalty The calculated early-withdrawal penalty in token units.
     function _penalty(LendingPosition memory queriedPos) internal view returns (uint256) {
-        uint256 totalTime = queriedPos.startTime;
-        uint256 initialLend = queriedPos.amount;
+        uint256 elapsed = block.timestamp - queriedPos.startTime;
 
-        uint256 hoursSpent = block.timestamp - totalTime;
-        uint256 hoursLeft = lockDuration - hoursSpent;
+        if (elapsed >= lockDuration) {
+            return 0;
+        }
+
+        uint256 timeLeft = lockDuration - elapsed;
 
         // Penalty = (InitialLend × PenaltyRate × HoursLeft) / TotalHours
-        uint256 Penalty = (initialLend * penaltyRate * hoursLeft) / lockDuration * 100;
+        uint256 Penalty = (queriedPos.amount * penaltyRate * timeLeft) / lockDuration * PERCENTAGE_PRECISION;
 
         return Penalty;
     }
@@ -363,7 +511,31 @@ abstract contract Lending is ILending, Ownable, ReentrancyGuard {
     ///    GETTERS
     ///////////////////////////////////////////////////////
 
-    function getLiquidity(address _token) public view returns (uint256) {
-        return (IERC20(_token).balanceOf(address(this)) - penaltyReward[_token]);
+    function getLiquidity(address _token) public view returns (uint256){
+        return Math.mulDiv(poolBalance[_token], POOL_AVAILABILITY, PERCENTAGE_PRECISION);
+    }
+
+    function getBoxId(address token, uint256 number) public view zeroCheck(number) returns (bytes32) {
+        --number;
+        // uint256 _number = number - 1;
+
+        return IDs[token][number];
+    }
+
+    function getLendStatus(bytes32 _id, address _token) public view returns(string memory){
+        PendingBox[] storage box = pendingBoxes[_token][_id];
+
+        uint256 index;
+        for(uint256 i = 0; i < box.length; i++){
+            if(box[i].id == _id){
+                index = i;
+                break;
+            }
+        }
+        
+        if(pendingBoxes[_token][_id][index].pending == false){
+            return "In Position";
+        }
+        return "Pending";
     }
 }

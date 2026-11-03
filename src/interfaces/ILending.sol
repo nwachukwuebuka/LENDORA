@@ -33,4 +33,6 @@ interface ILending {
     function releaseBorrowedTokens(address _token, address _receiver, uint256 _amount) external;
 
     function getLiquidity(address _token) external view returns (uint256);
+
+    function getBoxId(address token, uint256 number) external view returns (bytes32);
 }

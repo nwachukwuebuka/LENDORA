@@ -56,6 +56,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
     uint256 private firstQuotaPercent = 30;
     uint256 private secondQuotaPercent = 75;
     uint256 private idPosition;
+    uint256 box;
     mapping(address _token => uint256 _amount) private interestHistory;
 
     struct BorrowStatus {
@@ -73,9 +74,9 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
     mapping(address _user => mapping(address _token => uint256 _amount)) private collateral;
 
     // debt
-    mapping(address _user => BorrowStatus[]) private debtPosition;
-    mapping(address _user => BorrowStatus[]) private debtHistory;
-    mapping(address _token => uint256 _amount) private protocolDebt;
+    mapping(address _user => BorrowStatus[]) public debtPosition;
+    mapping(address _user => BorrowStatus[]) public debtHistory;
+    mapping(address _token => uint256 _amount) public protocolDebt;
 
     address[] private supportedTokens;
 
@@ -195,8 +196,8 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
 
         // effects
 
-        uint256 newId = ++idPosition;
-        bytes32 hashedId = keccak256(abi.encode(address(this), newId));
+        uint256 boxNumber = ++box;
+        bytes32 hashedId = lend.getBoxId(_debtToken, boxNumber);
         debtPosition[msg.sender].push(
             BorrowStatus({
                 uniqueId: hashedId,
