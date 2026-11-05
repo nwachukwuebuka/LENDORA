@@ -40,23 +40,23 @@ contract PriceFeedOracle is IPriceFeedOracle {
     ///@dev contract addresses must be valid deployed contracts
     ///@dev values are directly set into mapping(tokenPack), tokenAddress => priceFeed
     ///
-    constructor(address wbtcToken, address wbtcPriceFeed, address wethToken, address wethPriceFeed) {
+    constructor(address usdcToken, address usdcPriceFeed, address wethToken, address wethPriceFeed) {
         if (
-            wbtcToken == address(0) || wbtcPriceFeed == address(0) || wethToken == address(0)
-                || wethPriceFeed == address(0) || wbtcToken == wethToken
+            usdcToken == address(0) || usdcPriceFeed == address(0) || wethToken == address(0)
+                || wethPriceFeed == address(0) || usdcToken == wethToken
         ) {
             revert PriceFeedOracle__InvalidAddress();
         }
 
         if (
-            wbtcToken.code.length == 0 || wethToken.code.length == 0 || wbtcPriceFeed.code.length == 0
+            usdcToken.code.length == 0 || wethToken.code.length == 0 || usdcPriceFeed.code.length == 0
                 || wethPriceFeed.code.length == 0
         ) {
             revert PriceFeedOracle__InvalidAddress();
         }
-        tokenPack[wbtcToken] = wbtcPriceFeed;
+        tokenPack[usdcToken] = usdcPriceFeed;
         tokenPack[wethToken] = wethPriceFeed;
-        supportedTokens.push(wbtcToken);
+        supportedTokens.push(usdcToken);
         supportedTokens.push(wethToken);
     }
 
