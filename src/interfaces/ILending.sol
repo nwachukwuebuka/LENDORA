@@ -28,7 +28,7 @@ interface ILending {
 
     function updateBorrowRecord(address _user, uint256 _amount, bytes32 _uniqueId) external;
 
-    function receiveRepayment(address borrower, bytes32 uniqueId, uint256 amount) external;
+    function receiveRepayment(address borrower, address payer, bytes32 uniqueId, uint256 amount) external;
 
     function releaseBorrowedTokens(address _token, address _receiver, uint256 _amount) external;
 

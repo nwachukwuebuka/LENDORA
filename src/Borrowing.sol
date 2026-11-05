@@ -11,15 +11,15 @@ import {ILending} from "./interfaces/ILending.sol";
 import {IPriceFeedOracle} from "./interfaces/IPriceFeedOracle.sol";
 import {IBorrowing} from "./interfaces/IBorrowing.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  ***@author Nwachukwu Chukwuebuka
  ***@title Lendora Borrowing System
  *
  */
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-abstract contract Borrowing is IBorrowing, ReentrancyGuard {
+contract Borrowing is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     ///////////////////////////////////////////////////////
@@ -41,6 +41,24 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
     error Borrowing__NotEnoughWithdrawableBalance();
     error Borrowing__UserNotLiquidatable();
     error Borrowing__InvalidInterestRate();
+    error Borrowing__MinimumCollateralNotMet();
+    error Lending__InsufficientBalance();
+    error Lending__InvalidAddressInput();
+
+    ///////////////////////////////////////////////////////
+    ///    CUSTOM VARIABLES
+    ///////////////////////////////////////////////////////
+    struct BorrowStatus {
+        bytes32 uniqueId;
+        address collateralToken;
+        uint256 lockedCollateralAmount;
+        address debtToken;
+        uint256 debtAmount;
+        uint256 totalDebt;
+        uint256 interestAmount;
+        uint256 startTime;
+        bool active;
+    }
 
     ///////////////////////////////////////////////////////
     ///    VARAIBLES
@@ -49,6 +67,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
     uint256 private constant PERCENTAGE_PRECISION = 100;
     uint256 private constant LTV_PERCENTAGE = 50;
     uint256 private LIQUIDATION_THRESHOLD = 80;
+    uint256 private constant LIQUIDATION_BONUS = 5;
     uint256 private minDeposit = 100e18; // $100
     uint256 public firstInterestRate = 2;
     uint256 public secondInterestRate = 5;
@@ -56,19 +75,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
     uint256 private firstQuotaPercent = 30;
     uint256 private secondQuotaPercent = 75;
     uint256 private idPosition;
-    uint256 box;
     mapping(address _token => uint256 _amount) private interestHistory;
-
-    struct BorrowStatus {
-        bytes32 uniqueId;
-        address collateralToken;
-        uint256 lockedCollateralAmount;
-        address debtToken;
-        uint256 debtAmount;
-        uint256 interestAmount;
-        uint256 startTime;
-        bool active;
-    }
 
     // collateral
     mapping(address _user => mapping(address _token => uint256 _amount)) private collateral;
@@ -77,6 +84,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
     mapping(address _user => BorrowStatus[]) public debtPosition;
     mapping(address _user => BorrowStatus[]) public debtHistory;
     mapping(address _token => uint256 _amount) public protocolDebt;
+    mapping(address token => uint256 number) private boxCounter;
 
     address[] private supportedTokens;
 
@@ -137,6 +145,9 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
     ///////////////////////////////////////////////////////
 
     constructor(address _lendingContract, address _priceOracle) {
+        if (_lendingContract == address(0) || _priceOracle == address(0)) {
+            revert Lending__InvalidAddressInput();
+        }
         lend = ILending(_lendingContract);
         oracle = IPriceFeedOracle(_priceOracle);
 
@@ -145,7 +156,6 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
 
     function depositCollateral(uint256 _amount, address _token)
         external
-        override
         nonReentrant
         zeroCheck(_amount)
         oneTokenSupport(_token)
@@ -165,46 +175,53 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
 
     function borrow(address _collateralToken, uint256 _lockCollateralAmount, address _debtToken, uint256 _debtAmount)
         external
-        override
         nonReentrant
         zeroCheck(_debtAmount)
         twoTokensSupport(_collateralToken, _debtToken)
     {
+        uint256 userCollateralViaSingleToken = collateral[msg.sender][_collateralToken];
+        uint256 lockCollateralUsdWorth = oracle.calculateTokenWorthInUsd(_collateralToken, _lockCollateralAmount);
+        uint256 borrowLimit = (lockCollateralUsdWorth * LTV_PERCENTAGE) / PERCENTAGE_PRECISION;
+        uint256 interest = _interest(_debtAmount, _debtToken);
+        uint256 totalLoan = interest + _debtAmount;
+        uint256 boxNumber = ++boxCounter[_debtToken];
+        bytes32 hashedId = lend.getBoxId(_debtToken, boxNumber);
+        uint256 totalLoanUsdWorth = oracle.calculateTokenWorthInUsd(_debtToken, totalLoan);
+        uint256 collateralUsdWorth = oracle.calculateTokenWorthInUsd(_collateralToken, userCollateralViaSingleToken);
+        uint256 debtUsdWorth = oracle.calculateTokenWorthInUsd(_debtToken, _debtAmount);
+
         // checks
+        if (_lockCollateralAmount > collateral[msg.sender][_collateralToken]) {
+            revert Borrowing__NoCurrentCollateral();
+        }
+
+        if (lockCollateralUsdWorth < minDeposit) {
+            revert Borrowing__MinimumCollateralNotMet();
+        }
+
         if (_debtToken == _collateralToken) {
             revert Borrowing__CantBeSameToken();
         }
-        uint256 userCollateralViaSingleToken = collateral[msg.sender][_collateralToken];
-        uint256 collateralUsdWorth = oracle.calculateTokenWorthInUsd(_collateralToken, userCollateralViaSingleToken);
         if (collateralUsdWorth < minDeposit) {
             revert Borrowing__LessThanMinimumCollateralWorth();
         }
 
-        uint256 debtUsdWorth = oracle.calculateTokenWorthInUsd(_debtToken, _debtAmount);
-        uint256 lockCollateralUsdWorth = oracle.calculateTokenWorthInUsd(_collateralToken, _lockCollateralAmount);
         if (!(debtUsdWorth * 2 <= lockCollateralUsdWorth)) {
             revert Borrowing__CollateralMustBeTwiceAsDebt();
         }
 
-        uint256 borrowLimit = (lockCollateralUsdWorth * LTV_PERCENTAGE) / PERCENTAGE_PRECISION;
-        uint256 interest = _interest(_debtAmount, _debtToken);
-        uint256 totalLoan = interest + _debtAmount;
-        uint256 totalLoanUsdWorth = oracle.calculateTokenWorthInUsd(_debtToken, totalLoan);
         if (totalLoanUsdWorth > borrowLimit) {
             revert Borrowing__CantBorrowMoreThanLimit();
         }
 
-        // effects
-
-        uint256 boxNumber = ++box;
-        bytes32 hashedId = lend.getBoxId(_debtToken, boxNumber);
         debtPosition[msg.sender].push(
             BorrowStatus({
                 uniqueId: hashedId,
                 collateralToken: _collateralToken,
                 lockedCollateralAmount: _lockCollateralAmount,
                 debtToken: _debtToken,
-                debtAmount: totalLoan,
+                debtAmount: _debtAmount,
+                totalDebt: totalLoan,
                 interestAmount: interest,
                 startTime: block.timestamp,
                 active: true
@@ -216,13 +233,15 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
                 collateralToken: _collateralToken,
                 lockedCollateralAmount: _lockCollateralAmount,
                 debtToken: _debtToken,
-                debtAmount: totalLoan,
+                debtAmount: _debtAmount,
+                totalDebt: totalLoan,
                 interestAmount: interest,
                 startTime: block.timestamp,
                 active: true
             })
         );
 
+        // effects
         lend.recordBorrow(msg.sender, hashedId, _debtToken, _collateralToken, _debtAmount, totalLoan, interest);
 
         collateral[msg.sender][_collateralToken] -= _lockCollateralAmount;
@@ -232,7 +251,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
         lend.releaseBorrowedTokens(_debtToken, msg.sender, _debtAmount);
     }
 
-    function clearPosition(uint256 _positionIndex, uint256 _amount) external override nonReentrant zeroCheck(_amount) {
+    function clearPosition(uint256 _positionIndex, uint256 _amount) external nonReentrant zeroCheck(_amount) {
         BorrowStatus[] storage position = debtPosition[msg.sender];
 
         if (_positionIndex >= position.length) {
@@ -251,10 +270,9 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
 
         // effects
         address collateralToken = position[_positionIndex].collateralToken;
-        address debtToken = position[_positionIndex].debtToken;
         uint256 lockedCollateral = position[_positionIndex].lockedCollateralAmount;
         bytes32 uniqueId = position[_positionIndex].uniqueId;
-        uint256 repaymentAmount = position[_positionIndex].debtAmount;
+        uint256 repaymentAmount = position[_positionIndex].totalDebt;
 
         collateral[msg.sender][collateralToken] += lockedCollateral;
         position[_positionIndex].debtAmount -= _amount;
@@ -265,14 +283,14 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
             }
             position.pop();
         }
+        debtHistory[msg.sender][_positionIndex].active = false;
 
         // interactions
-        lend.receiveRepayment(msg.sender, uniqueId, repaymentAmount);
+        lend.receiveRepayment(msg.sender, msg.sender, uniqueId, repaymentAmount);
     }
 
     function withdraw(address _token, uint256 _amount)
         external
-        override
         nonReentrant
         zeroCheck(_amount)
         oneTokenSupport(_token)
@@ -292,53 +310,44 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
         IERC20(_token).safeTransfer(msg.sender, _amount);
     }
 
-    function liquidate(address _user, uint256 _positionIndex, uint256 _amount)
-        external
-        nonReentrant
-        zeroCheck(_amount)
-    {
-        BorrowStatus storage position = debtPosition[_user][_positionIndex];
+    function liquidate(address _user, uint256 _positionIndex) external nonReentrant {
         BorrowStatus[] storage debtPositions = debtPosition[_user];
-        uint256 debtAmount = position.debtAmount;
-        address debtToken = position.debtToken;
-        address collateralToken = position.collateralToken;
-
         if (_positionIndex >= debtPositions.length) {
             revert Borrowing__InvalidPosition();
         }
+        BorrowStatus storage position = debtPosition[_user][_positionIndex];
+        uint256 debtAmount = position.debtAmount;
+        uint256 totaldebt = position.totalDebt;
+        address debtToken = position.debtToken;
+        address collateralToken = position.collateralToken;
         bool safe = _isSafe(_user, _positionIndex);
+        uint256 liquidationBonus = (totaldebt * LIQUIDATION_BONUS) / PERCENTAGE_PRECISION;
+        uint256 totalLiquidation = totaldebt + liquidationBonus;
+        bytes32 uniqueId = position.uniqueId;
+        uint256 lockedCollateral = position.lockedCollateralAmount;
+        uint256 lockedCollateralInUsd = oracle.calculateTokenWorthInUsd(position.collateralToken, lockedCollateral);
+        uint256 liquidationInUsd = oracle.calculateTokenWorthInUsd(debtToken, totalLiquidation);
+        uint256 liquidationInCollateralAmount = oracle.usdWorthToTokenAmount(collateralToken, liquidationInUsd);
+
+        uint256 refund = lockedCollateralInUsd - liquidationInUsd;
+        uint256 refundInToken = oracle.usdWorthToTokenAmount(collateralToken, refund);
 
         if (safe) {
             revert Borrowing__UserNotLiquidatable();
         }
 
-        if (_amount > debtAmount) revert Borrowing__LiquidationOutOfBound();
+        protocolDebt[debtToken] += debtAmount;
+        collateral[_user][collateralToken] += refundInToken;
 
-        uint256 liquidationBonus = (_amount * LIQUIDATION_THRESHOLD) / PERCENTAGE_PRECISION;
-        uint256 totalLiquidation = _amount + liquidationBonus;
-        bytes32 uniqueId = position.uniqueId;
-        uint256 lockedCollateral = position.lockedCollateralAmount;
-        uint256 lockedCollateralInUsd = oracle.calculateTokenWorthInUsd(position.collateralToken, lockedCollateral);
-
-        uint256 liquidationInUsd = oracle.calculateTokenWorthInUsd(debtToken, totalLiquidation);
-
-        uint256 liquidationInCollateralAmount = oracle.usdWorthToTokenAmount(collateralToken, liquidationInUsd);
-
-        if (debtAmount == _amount) {
-            for (uint256 i = _positionIndex; i < debtPositions.length - 1; i++) {
-                debtPositions[i] = debtPositions[i + 1];
-            }
-            debtPositions.pop();
-        } else {
-            position.debtAmount -= _amount;
+        for (uint256 i = _positionIndex; i < debtPositions.length - 1; i++) {
+            debtPositions[i] = debtPositions[i + 1];
         }
+        debtPositions.pop();
 
-        position.lockedCollateralAmount -= liquidationInCollateralAmount;
-        protocolDebt[debtToken] -= _amount;
+        lend.updateBorrowRecord(_user, totaldebt, uniqueId);
 
-        lend.updateBorrowRecord(_user, _amount, position.uniqueId);
-
-        IERC20(debtToken).safeTransferFrom(msg.sender, address(lend), _amount);
+        // interactions
+        lend.receiveRepayment(_user, msg.sender, uniqueId, totaldebt);
         IERC20(collateralToken).safeTransfer(msg.sender, liquidationInCollateralAmount);
     }
 
@@ -357,7 +366,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
     ///    HELPERS
     ///////////////////////////////////////////////////////
 
-    function _interest(uint256 _amount, address _token) public view override returns (uint256) {
+    function _interest(uint256 _amount, address _token) public view returns (uint256) {
         uint256 amountInUsd = oracle.calculateTokenWorthInUsd(_token, _amount);
 
         uint256 rate = _interestRate(_token);
@@ -370,7 +379,7 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
         return oracle.usdWorthToTokenAmount(_token, interestInUsd);
     }
 
-    function _interestRate(address _token) public view override returns (uint256) {
+    function _interestRate(address _token) public view returns (uint256) {
         //checks the liquidity of a token in lending protocol
         uint256 liquidity = lend.getLiquidity(_token);
         uint256 firstQuota = (liquidity * firstQuotaPercent) / PERCENTAGE_PRECISION;
@@ -383,8 +392,4 @@ abstract contract Borrowing is IBorrowing, ReentrancyGuard {
             return thirdInterestRate;
         }
     }
-
-    ///////////////////////////////////////////////////////
-    ///    GETTERS
-    ///////////////////////////////////////////////////////
 }

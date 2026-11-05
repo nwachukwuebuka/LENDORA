@@ -119,7 +119,7 @@ contract PriceFeedOracle is IPriceFeedOracle {
         return Math.mulDiv(price, _amount, tokenPrecision);
     }
 
-    function usdWorthToTokenAmount(address _token, uint256 _worth) external view returns (uint256) {
+    function usdWorthToTokenAmount(address _token, uint256 _worth) external view override returns (uint256) {
         // amount = worth / price
         uint8 tokenDecimals = IERC20Metadata(_token).decimals();
         uint256 tokenPrecision = 10 ** uint256(tokenDecimals);
@@ -131,7 +131,7 @@ contract PriceFeedOracle is IPriceFeedOracle {
     ///////////////////////////////////////////////////////
     ///    GETTERS
     ///////////////////////////////////////////////////////
-    function getAllSupportedTokens() external view returns (address[] memory) {
+    function getAllSupportedTokens() external view override returns (address[] memory) {
         return supportedTokens;
     }
 }
