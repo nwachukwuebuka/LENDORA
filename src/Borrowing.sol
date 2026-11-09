@@ -310,47 +310,6 @@ contract Borrowing is ReentrancyGuard {
         IERC20(_token).safeTransfer(msg.sender, _amount);
     }
 
-    function liquidate(address _user, uint256 _positionIndex) external nonReentrant {
-        BorrowStatus[] storage debtPositions = debtPosition[_user];
-        if (_positionIndex >= debtPositions.length) {
-            revert Borrowing__InvalidPosition();
-        }
-        BorrowStatus storage position = debtPosition[_user][_positionIndex];
-        uint256 debtAmount = position.debtAmount;
-        uint256 totaldebt = position.totalDebt;
-        address debtToken = position.debtToken;
-        address collateralToken = position.collateralToken;
-        bool safe = _isSafe(_user, _positionIndex);
-        uint256 liquidationBonus = (totaldebt * LIQUIDATION_BONUS) / PERCENTAGE_PRECISION;
-        uint256 totalLiquidation = totaldebt + liquidationBonus;
-        bytes32 uniqueId = position.uniqueId;
-        uint256 lockedCollateral = position.lockedCollateralAmount;
-        uint256 lockedCollateralInUsd = oracle.calculateTokenWorthInUsd(position.collateralToken, lockedCollateral);
-        uint256 liquidationInUsd = oracle.calculateTokenWorthInUsd(debtToken, totalLiquidation);
-        uint256 liquidationInCollateralAmount = oracle.usdWorthToTokenAmount(collateralToken, liquidationInUsd);
-
-        uint256 refund = lockedCollateralInUsd - liquidationInUsd;
-        uint256 refundInToken = oracle.usdWorthToTokenAmount(collateralToken, refund);
-
-        if (safe) {
-            revert Borrowing__UserNotLiquidatable();
-        }
-
-        protocolDebt[debtToken] += debtAmount;
-        collateral[_user][collateralToken] += refundInToken;
-
-        for (uint256 i = _positionIndex; i < debtPositions.length - 1; i++) {
-            debtPositions[i] = debtPositions[i + 1];
-        }
-        debtPositions.pop();
-
-        lend.updateBorrowRecord(_user, totaldebt, uniqueId);
-
-        // interactions
-        lend.receiveRepayment(_user, msg.sender, uniqueId, totaldebt);
-        IERC20(collateralToken).safeTransfer(msg.sender, liquidationInCollateralAmount);
-    }
-
     function _isSafe(address _user, uint256 _positionIndex) internal view returns (bool) {
         // checks if user is safe
         BorrowStatus storage position = debtPosition[_user][_positionIndex];

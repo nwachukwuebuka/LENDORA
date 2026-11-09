@@ -10,7 +10,6 @@ import {console2} from "forge-std/console2.sol";
 
 contract DeployPriceFeedOracle is Script {
     function run() external {
-
         address usdcToken = vm.envAddress("USDC_TOKEN");
         address usdcPriceFeed = vm.envAddress("USDC_PRICE_FEED");
 

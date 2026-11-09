@@ -28,7 +28,7 @@ contract PriceFeedOracle is IPriceFeedOracle {
     ///////////////////////////////////////////////////////
     ///    VARAIBLES
     ///////////////////////////////////////////////////////
-    uint256 private constant PRICE_MAX_AGE = 1 hours;
+    uint256 constant PRICE_MAX_AGE = 1 hours;
     mapping(address token => address priceFeed) private tokenPack;
     address[] private supportedTokens;
 
@@ -87,6 +87,7 @@ contract PriceFeedOracle is IPriceFeedOracle {
         if (answer <= 0) {
             revert PriceFeedOracle__InvalidPriceFeed();
         }
+        //uinitialization or claiming updated from future
         if (updatedAt == 0 || updatedAt > block.timestamp) {
             revert PriceFeedOracle__InvalidTimestamp();
         }
