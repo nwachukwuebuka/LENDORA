@@ -5,9 +5,9 @@ pragma solidity ^0.8.24;
 ///    IMPORTS
 ///////////////////////////////////////////////////////
 import {Test, console2} from "forge-std/Test.sol";
-import {PriceFeedOracle} from "../src/PriceFeedOracle.sol";
-import {ERC20Mock} from "./mocks/ERC20Mock.sol";
-import {MockV3Aggregator} from "./mocks/MockV3Aggregator.sol";
+import {PriceFeedOracle} from "src/PriceFeedOracle.sol";
+import {ERC20Mock} from "../mocks/ERC20Mock.sol";
+import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract PriceFeedOracleTest is Test {
@@ -198,5 +198,96 @@ contract PriceFeedOracleTest is Test {
         assertEq(tokens.length, 2);
         assertEq(tokens[0], address(usdcToken));
         assertEq(tokens[1], address(wethToken));
+    }
+
+
+
+
+    ///////////////////////////////////////////////////////
+    ///    FUZZ TESTS
+    ///////////////////////////////////////////////////////
+
+    function testFuzzGetTokenUsdValue(uint256 tokenAmount) public {
+        vm.assume(tokenAmount <= 1000e18);
+    
+        uint256 expected = Math.mulDiv(
+            tokenAmount,
+            2000e18,
+            1e18
+        );
+        
+
+        uint256 amount = oracle.calculateTokenWorthInUsd(address(wethToken), tokenAmount);
+        console2.log("tokenAmount:", tokenAmount);   
+        assertEq(expected, amount);
+    }
+
+    function testFuzzGetTokenAmount(uint256 usdAmount) public {
+        vm.assume(usdAmount > 0 && usdAmount <= 1000e18);
+        
+        uint256 expected = (usdAmount * 1e18) / 2000e18;
+
+        uint256 amount = oracle.usdWorthToTokenAmount(address(wethToken), usdAmount);
+
+        assertEq(amount, expected);
+    }
+
+    function testFuzzPriceUpdateRate(uint256 time) public {
+        vm.assume(time > 0 && time <= type(uint256).max - 1);
+        ethPriceFeed.updateTimestamp(block.timestamp + time);
+
+        vm.expectRevert(PriceFeedOracle.PriceFeedOracle__InvalidTimestamp.selector);
+        oracle.calculateTokenWorthInUsd(address(wethToken), TEST_TOKEN);
+
+        ethPriceFeed.updateTimestamp(0);
+
+        vm.expectRevert(PriceFeedOracle.PriceFeedOracle__InvalidTimestamp.selector);
+        oracle.calculateTokenWorthInUsd(address(wethToken), TEST_TOKEN);
+    }
+
+    function testFuzzUnsupportedToken(address token) public {
+        vm.assume(token != address(wethToken));
+        vm.assume(token != address(usdcToken));
+
+        vm.expectRevert(
+            PriceFeedOracle.PriceFeedOracle__TokenNotSupported.selector
+        );
+
+        oracle.calculateTokenWorthInUsd(token, 1 ether);
+    }
+    
+    function testFuzzIfPriceIsNegative(int256 value) public {
+        vm.assume(value < 0);
+        ethPriceFeed.updateAnswer(value);
+
+        vm.expectRevert(PriceFeedOracle.PriceFeedOracle__InvalidPriceFeed.selector);
+        oracle.getPriceInUsd(address(wethToken));
+    }
+    function testFuzzWhenFeedDecimalIsGreaterThan18(uint8 decimal) public {
+        vm.assume(decimal > 18 && decimal <= 73);
+        MockV3Aggregator newFeed = new MockV3Aggregator(decimal, int256(2000 * 10**decimal));
+
+        PriceFeedOracle newOracle =
+            new PriceFeedOracle(address(usdcToken), address(usdcPriceFeed), address(wethToken), address(newFeed));
+
+        uint256 amount = newOracle.getPriceInUsd(address(wethToken));
+
+        assertEq(amount, 2000e18);
+    }
+
+    function testFuzzTokenAddressHasNoCode(address token) public {
+        vm.assume(token.code.length == 0);
+        vm.assume(token != address(0));
+
+        vm.expectRevert(
+            PriceFeedOracle.PriceFeedOracle__InvalidAddress.selector
+        );
+
+        new PriceFeedOracle(
+            token,
+            address(usdcPriceFeed),
+            address(wethToken),
+            address(ethPriceFeed)
+        );
     }
 }
