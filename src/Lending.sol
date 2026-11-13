@@ -18,10 +18,10 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
  * @author Nwachukwu Chukwuebuka
  * @notice Manages the lending operations of the Lendora DeFi protocol.
  * @dev Handles lender deposits, lending positions, lending boxes,
- *      withdrawals, early-withdrawal penalties, interest distribution,
- *      and communication with the Borrowing contract.
+ * ntract.
  *
- *      Deposits are organized into boxes containing up to 20 lenders.
+ *          withdrawals, early-withdrawal penalties, interest distribution,
+ *      and communication with the Borrowing co Deposits are organized into boxes containing up to 20 lenders.
  *      Only completed boxes are intended to be available for borrowing.
  *
  *      The contract also maintains borrower repayment records and
@@ -50,11 +50,14 @@ contract Lending is Ownable, ReentrancyGuard {
     error Lending__LiquidationOutOfBound();
     error Lending__ProtocolLendingLimit();
     error Lending__LendingBoxesExceeded();
+    error Lending__LendingBoxDoesNotExist();
     error Lending__NoInterestToClaim();
-    error Lending__LessThanMinimalAmountOrTokenNotSupported();
+    error Lending__TokenNotSupported();
     error Lending__NoAvailableInterest();
     error Lending__InvalidTransaction();
     error Lending__TransactionPending();
+    error Lending__OracleIsZeroAddress();
+    error Lending__OracleContractHasNoCode();
 
     ///////////////////////////////////////////////////////
     ///    CUSTOM TYPES
@@ -140,24 +143,24 @@ contract Lending is Ownable, ReentrancyGuard {
     uint256 private withdrawTime = 12 hours;
     uint256 public lockDuration = 84 days;
     uint256 public penaltyRate = 5; // 5%
-    uint256 public minimumDeposit = 1000e18; //$1000
+    uint256 public minimumDeposit = 1000e18; //$1000 in USD
     mapping(address token => uint256 amount) private pendedBox;
     uint256 private constant MAX_IN_BOX = 20;
-    mapping(address _token => mapping(bytes32 _id => PendingBox[])) private pendingBoxes;
+    mapping(address _token => mapping(bytes32 _id => PendingBox[])) public pendingBoxes;
     mapping(address _token => uint256 _amount) public poolBalance;
     mapping(address _token => address[] _lender) private poolLenders;
-    mapping(address user => mapping(address token => LendingPosition[])) private lentPositions;
+    mapping(address user => mapping(address token => LendingPosition[])) public lentPositions;
     mapping(address user => mapping(address token => LendingPosition[])) private lendHistory;
-    mapping(address user => PendingWithdrawal[]) private pendingWithdrawals;
+    mapping(address user => PendingWithdrawal[]) public pendingWithdrawals;
     mapping(address token => mapping(bytes32 id => uint256 amount)) private remainsOfCurrentBox;
     mapping(address token => bytes32[] id) private IDs;
     mapping(address token => mapping(bytes32 id => uint256 amount)) private boxPenaltyReward;
     mapping(address lender => mapping(address token => uint256 amount)) private interestShare;
-    mapping(address token => uint256 time) private timeStampHolder;
-    mapping(address token => uint256 number) private borrowBoxIndex;
+    mapping(address token => uint256 time) public timeStampHolder;
+    mapping(address token => uint256 number) public borrowBoxIndex;
 
     // BORROWERS COPY
-    mapping(address user => mapping(address token => uint256 amount)) private neutralBalance;
+    mapping(address user => mapping(address token => uint256 amount)) public neutralBalance;
     IPriceFeedOracle private priceOracle;
     address public borrowingContract;
     mapping(address _user => BorrowRecord[]) private borrowRecords;
@@ -197,6 +200,12 @@ contract Lending is Ownable, ReentrancyGuard {
     /// @dev Sets the initial owner and price oracle.
     /// @param _priceFeedOracle The address of the price oracle contract.
     constructor(address _priceFeedOracle) Ownable(msg.sender) {
+        if(_priceFeedOracle == address(0)){
+            revert Lending__OracleIsZeroAddress();
+        }
+        if(_priceFeedOracle.code.length == 0 ){
+            revert Lending__OracleContractHasNoCode();
+        }
         priceOracle = IPriceFeedOracle(_priceFeedOracle);
     }
 
@@ -205,7 +214,7 @@ contract Lending is Ownable, ReentrancyGuard {
     ///      records the total amount of a particular that a user owns.
     /// @param _token The address of the token to lend.
     /// @param _amount The amount of tokens to deposit.
-    function lend(uint256 _amount, address _token) external nonReentrant {
+    function lend(uint256 _amount, address _token) external zeroCheck(_amount) nonReentrant {
         if (timeStampHolder[_token] == 0) {
             timeStampHolder[_token] = block.timestamp;
         }
@@ -215,13 +224,13 @@ contract Lending is Ownable, ReentrancyGuard {
         bytes32 _id = keccak256(abi.encode(timestampHolder, boxNumber));
 
         if (!priceOracle.isTokenSupported(_token)) {
-            revert Lending__LessThanMinimalAmountOrTokenNotSupported();
+            revert Lending__TokenNotSupported();
         }
 
         uint256 worth = priceOracle.calculateTokenWorthInUsd(_token, _amount);
 
         if (worth < minimumDeposit) {
-            revert Lending__LessThanMinimalAmountOrTokenNotSupported();
+            revert Lending__LessThanMinimalAmount();
         }
 
         IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
@@ -307,6 +316,7 @@ contract Lending is Ownable, ReentrancyGuard {
         if (pend[index].requestime + withdrawTime > block.timestamp) revert Lending__TransactionPending();
 
         pend[index].status = WithdrawalStatus.completed;
+        pend[index].amount = 0;
         IERC20(pend[index].token).safeTransfer(msg.sender, pend[index].amount);
     }
 
@@ -319,6 +329,7 @@ contract Lending is Ownable, ReentrancyGuard {
         // checks
         uint256 positionIndex = _position - 1;
         LendingPosition[] storage positions = lentPositions[msg.sender][_token];
+        // .length = 3.........., 0,1,2 ----> length must be greater than index
         if (positionIndex >= positions.length) {
             revert Lending__PositionDoesNotExist();
         }
@@ -332,9 +343,6 @@ contract Lending is Ownable, ReentrancyGuard {
         uint256 penalty = _penalty(position);
         uint256 index;
 
-        if (lentAmount == 0) {
-            revert Lending__PositionAlreadyWithdrawn();
-        }
 
         uint256 withdrawal = lentAmount - penalty;
 
@@ -388,10 +396,16 @@ contract Lending is Ownable, ReentrancyGuard {
         uint256 pool20 = (20 * poolAmount) / PERCENTAGE_PRECISION;
         uint256 index = borrowBoxIndex[_token];
         if (index >= IDs[_token].length) {
-            revert Lending__LendingBoxesExceeded();
+            revert Lending__LendingBoxDoesNotExist();
         }
         bytes32 currentId = IDs[_token][index];
-        bytes32 nextId = IDs[_token][index + 1];
+        bytes32 nextId;
+        if (index + 1 < IDs[_token].length) {
+            nextId = IDs[_token][index + 1];
+        }else{
+            revert Lending__LendingBoxesExceeded();
+        }
+
         // bytes32 nextId = IDs[_token][++index];
 
         if (pool20 <= _amount) revert Lending__ProtocolLendingLimit();
@@ -717,6 +731,12 @@ contract Lending is Ownable, ReentrancyGuard {
         return IDs[token][number];
     }
 
+    function getIDsLength(address token) public returns(uint256){
+
+        return IDs[token].length;
+    }
+
+    
     /**
      * @notice Returns the current status of a lender's box contribution.
      * @dev Checks the pending status recorded for the specified box.
@@ -739,5 +759,9 @@ contract Lending is Ownable, ReentrancyGuard {
             return "In Position";
         }
         return "Pending";
+    }
+
+    function getPendWithdrawalLength(address lender) public view returns(uint256){
+        return pendingWithdrawals[lender].length;
     }
 }

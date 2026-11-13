@@ -36,8 +36,9 @@ contract PriceFeedOracleTest is Test {
     ///    FUNCTIONS
     ///////////////////////////////////////////////////////
     function setUp() public {
-        wethToken = new ERC20Mock();
-        usdcToken = new ERC20Mock();
+        wethToken = new ERC20Mock("WethToken", "WETH", 18);
+        usdcToken = new ERC20Mock("UsdcToken", "USDC", 6);
+
         ethPriceFeed = new MockV3Aggregator(PRICEFEED_DECIMALS, ETH_PRICE);
         usdcPriceFeed = new MockV3Aggregator(PRICEFEED_DECIMALS, USDC_PRICE);
 

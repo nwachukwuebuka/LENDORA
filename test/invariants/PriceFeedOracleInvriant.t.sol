@@ -35,8 +35,9 @@ contract PriceFeedOracleInvariants is StdInvariant, Test{
     ///////////////////////////////////////////////////////
 
     function setUp() public {
-        wethToken = new ERC20Mock();
-        usdcToken = new ERC20Mock();
+        wethToken = new ERC20Mock("WethToken", "WETH", 18);
+        usdcToken = new ERC20Mock("UsdcToken", "USDC", 6);
+
 
         ethPriceFeed = new MockV3Aggregator(
             8,
